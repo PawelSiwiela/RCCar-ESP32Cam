@@ -28,7 +28,7 @@ This project implements a video streaming server using the ESP32-CAM module. It 
 ## Installation
 1. Clone the repository
 ```bash
-git clone https://github.com/PaeSielawa/RCCar-ESP32Cam.git
+git clone https://github.com/PawelSiwiela/RCCar-ESP32Cam.git
 ```
 
 2. Open project in PlatformIO
