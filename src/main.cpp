@@ -2,10 +2,15 @@
 #include <WebServer.h>
 #include <esp_camera.h>
 
-const char* ssid = "Pae";
-const char* password = "20022005ab";
+const char* ssid = "S23";
+const char* password = "1234567890";
 
 WebServer server(80);
+
+// Globalne zmienne do przechowywania prędkości i dystansu
+float carSpeed = 0.0;
+float carDistance = 0.0;
+unsigned long lastSpeedDataTime = 0;
 
 // Konfiguracja pinów ESP32-CAM
 #define PWDN_GPIO_NUM     32
@@ -83,8 +88,25 @@ void handleRoot() {
   html += "<style>";
   html += "body{margin:0;background:#000;display:flex;flex-direction:column;align-items:center;}";
   html += "img{max-width:100%;height:auto;object-fit:contain;}";
+  html += ".telemetry{background-color:#333;color:white;padding:10px;margin-top:10px;border-radius:5px;width:80%;max-width:600px;font-family:Arial,sans-serif;}";
+  html += ".telemetry h3{margin:0 0 10px 0;text-align:center;}";
+  html += ".value{font-size:18px;margin:5px 0;}";
+  html += ".stale{color:#ff5555;}";
   html += "</style></head><body>";
   html += "<img id='stream' src='/stream'>";
+  
+  // Dodaj sekcję z prędkością i dystansem
+  html += "<div class='telemetry'>";
+  html += "<h3>Car Telemetry</h3>";
+  html += "<p class='value'>Speed: <span id='speed'>" + String(carSpeed, 1) + "</span> km/h</p>";
+  html += "<p class='value'>Distance: <span id='distance'>" + String(carDistance, 1) + "</span> m</p>";
+  
+  // Sprawdź czy dane są aktualne (otrzymane w ciągu ostatnich 5 sekund)
+  if (millis() - lastSpeedDataTime > 5000) {
+    html += "<p class='value stale'>Data connection lost</p>";
+  }
+  html += "</div>";
+  
   html += "<script>";
   html += "const img=document.getElementById('stream');";
   html += "let loading=false;";
@@ -95,7 +117,22 @@ void handleRoot() {
   html += "  img.onload=()=>loading=false;";
   html += "  img.onerror=()=>loading=false;";
   html += "}";
+  
+  // Dodaj funkcje do aktualizacji telemetrii
+  html += "function updateTelemetry(){";
+  html += "  fetch('/telemetry_data').then(response=>response.json()).then(data=>{";
+  html += "    document.getElementById('speed').textContent=data.speed.toFixed(1);";
+  html += "    document.getElementById('distance').textContent=data.distance.toFixed(1);";
+  html += "    if(data.stale){";
+  html += "      document.querySelector('.telemetry').classList.add('stale');";
+  html += "    }else{";
+  html += "      document.querySelector('.telemetry').classList.remove('stale');";
+  html += "    }";
+  html += "  });";
+  html += "}";
+
   html += "setInterval(updateImage,100);"; // Częstsze odświeżanie - co 100ms
+  html += "setInterval(updateTelemetry,1000);"; // Aktualizacja telemetrii co sekundę
   html += "</script></body></html>";
   server.send(200, "text/html", html);
 }
@@ -117,28 +154,80 @@ void handleStream() {
   esp_camera_fb_return(fb);
 }
 
+// Funkcja do obsługi endpointu /speed_data
+void handleSpeedData() {
+  if (server.hasArg("speed") && server.hasArg("distance")) {
+    carSpeed = server.arg("speed").toFloat();
+    carDistance = server.arg("distance").toFloat();
+    lastSpeedDataTime = millis();
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.send(400, "text/plain", "Bad Request");
+  }
+}
+
+// Funkcja do dostarczania danych telemetrycznych w formacie JSON
+void handleTelemetryData() {
+  String json = "{";
+  json += "\"speed\":" + String(carSpeed, 2) + ",";
+  json += "\"distance\":" + String(carDistance, 2) + ",";
+  json += "\"stale\":" + String((millis() - lastSpeedDataTime > 5000) ? "true" : "false");
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
 void setup() {
   Serial.begin(115200);
+  Serial.println("ESP32-CAM inicjalizacja");
   
   // Inicjalizacja kamery
   initCamera();
   
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false); // Wyłącz tryb oszczędzania energii WiFi
+  
+  // Konfiguracja statycznego IP bazująca na wykrytych wartościach
+  IPAddress staticIP(192, 168, 251, 156);  // Przypisany adres IP z poprzedniej sesji
+  IPAddress gateway(192, 168, 251, 164);   // Adres bramy (hotspot telefonu)
+  IPAddress subnet(255, 255, 255, 0);      // Maska podsieci
+  IPAddress dns(192, 168, 251, 164);       // Serwer DNS (ten sam co brama)
+  
+  // Zastosuj konfigurację statycznego IP
+  if (!WiFi.config(staticIP, gateway, subnet, dns)) {
+    Serial.println("Błąd konfiguracji statycznego IP - używam DHCP");
+  } else {
+    Serial.println("Zastosowano konfigurację statycznego IP");
+  }
+  
+  // Rozpocznij łączenie z siecią
+  Serial.printf("Łączenie z Wi-Fi: %s\n", ssid);
   WiFi.begin(ssid, password);
   
-  Serial.print("Łączenie z Wi-Fi");
-  while (WiFi.status() != WL_CONNECTED) {
+  // Dodajemy timeout dla połączenia WiFi
+  unsigned long startAttemptTime = millis();
+  
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 20000) {
     delay(500);
     Serial.print(".");
+  }
+  
+  // Sprawdź czy połączono
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("\nBłąd połączenia z WiFi. Resetowanie...");
+    delay(1000);
+    ESP.restart();
+    return;
   }
 
   Serial.println("");
   Serial.println("Połączono z Wi-Fi");
+  Serial.print("Adres IP: ");
   Serial.println(WiFi.localIP());
-
+  
   server.on("/", handleRoot);
   server.on("/stream", handleStream);
+  server.on("/speed_data", HTTP_GET, handleSpeedData);
+  server.on("/telemetry_data", HTTP_GET, handleTelemetryData);
   server.begin();
   Serial.println("Serwer HTTP uruchomiony");
 }
